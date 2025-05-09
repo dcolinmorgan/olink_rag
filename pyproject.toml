@@ -12,4 +12,5 @@ dependencies = [
     "haystack-ai",
     "transformers",
     "scikit-learn>=1.6.1",
+    "certifi",
 ]

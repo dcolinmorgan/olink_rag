@@ -1,4 +1,3 @@
-
 from Bio import Entrez
 from haystack import Pipeline, Document
 from haystack_integrations.document_stores.elasticsearch import ElasticsearchDocumentStore
@@ -28,7 +27,7 @@ indexing_pipeline.add_component("writer", DocumentWriter(document_store=document
 indexing_pipeline.connect("embedder.documents", "writer.documents")
 
 # Function to fetch PubMed abstracts based on search terms
-def fetch_pubmed_abstracts(search_terms, max_results=10000):
+def fetch_pubmed_abstracts(search_terms, max_results=100):
     logger.debug(f"Fetching abstracts for terms: {search_terms}")
     query = " AND ".join([f"{term}[TIAB]" for term in search_terms])
     handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results)
