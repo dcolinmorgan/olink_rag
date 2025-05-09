@@ -6,11 +6,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "bio>=1.8.0",
-    "pydantic==2.1.0",
     "torch>=2.7.0",
-    "biopython==1.81",
-    "haystack-ai",
     "transformers",
     "scikit-learn>=1.6.1",
-    "certifi",
+    "haystack-ai==2.6.1",
+    "pip>=25.1.1",
+    "elasticsearch-haystack>=2.1.0",
+    "sentence-transformers==3.0.0",
+    "aiohttp>=3.11.18",
 ]
