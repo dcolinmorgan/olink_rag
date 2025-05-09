@@ -12,23 +12,18 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Configure Entrez API
-Entrez.email = "dcolinmorgan@gmail.com"  # Replace with your email
-Entrez.api_key = "082b8e691fba75d90be45e9c9970d6f0b909"     # Replace with your NCBI API key from https://www.ncbi.nlm.nih.gov/account/
+Entrez.email = "dcolinmorgan@gmail.com"
+Entrez.api_key = "082b8e691fba75d90be45e9c9970d6f0b909"
 
-# on mac
-# docker run -d -p 9200:9200 -e "discovery.type=single-node" -e "xpack.security.enabled=false" --name elasticsearch -m 2g elasticsearch:8.8.0
-# Initialize Elasticsearch document store
-# document_store = ElasticsearchDocumentStore(
-#     hosts="http://localhost:9200",
-#     index="scientific_papers"
-# )
 # Define custom mapping for Elasticsearch index
 custom_mapping = {
     "mappings": {
         "properties": {
             "embedding": {
                 "type": "dense_vector",
-                "dims": 768  # Match allenai/specter embedding size
+                "dims": 768,
+                "index": True,
+                "similarity": "cosine"
             },
             "content": {"type": "text"},
             "meta": {"type": "object"}
@@ -37,32 +32,21 @@ custom_mapping = {
 }
 
 # Initialize Elasticsearch document store
-# For local macOS: Use 'http://host.docker.internal:9200' (or 'http://host.docker.internal:9201' if port changed)
-# For AWS EC2: Use 'http://localhost:9200' if on the same instance, or the EC2 private IP (e.g., 'http://172.31.x.x:9200')
 def setup_document_store():
     """Initialize and return the Elasticsearch document store."""
     logger.info("Setting up document store")
-    
-    # Define the mapping for the index
-    mapping = {
-        "properties": {
-            "content": {"type": "text"},
-            "embedding": {
-                "type": "dense_vector",
-                "dims": 768,
-                "index": True,
-                "similarity": "cosine"
-            }
-        }
-    }
-    
-    return ElasticsearchDocumentStore(
-        hosts=["http://localhost:9200"],
-        index="scientific_papers",
-        # username="",
-        # password="",
-        custom_mapping=mapping
-    )
+    try:
+        return ElasticsearchDocumentStore(
+            hosts=["http://localhost:9200"],
+            index="scientific_papers",
+            custom_mapping=custom_mapping,
+            request_timeout=30,
+            retry_on_timeout=True,
+            max_retries=3
+        )
+    except :
+        logger.error(f"Failed to initialize ElasticsearchDocumentStore: {e}")
+        raise
 
 # Initialize indexing pipeline
 indexing_pipeline = Pipeline()
@@ -71,7 +55,7 @@ indexing_pipeline.add_component("writer", DocumentWriter(document_store=setup_do
 indexing_pipeline.connect("embedder.documents", "writer.documents")
 
 # Function to fetch PubMed abstracts based on search terms
-def fetch_pubmed_abstracts(search_terms, max_results=100):
+def fetch_pubmed_abstracts(search_terms, max_results=1000):
     logger.debug(f"Fetching abstracts for terms: {search_terms}")
     query = " AND ".join([f"{term}[TIAB]" for term in search_terms])
     handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results)
@@ -124,8 +108,9 @@ def ingest_pubmed_abstracts(search_terms):
     try:
         indexing_pipeline.run(data={"embedder": {"documents": documents}})
         logger.debug(f"Ingested {len(documents)} documents into Elasticsearch")
-    except:
-        logger.error(f"Error indexing documents due to Elasticsearch issue")
+
+    except Exception as e:
+        logger.error(f"Error indexing documents: {e}")
         raise
 
 # Example usage

@@ -17,4 +17,6 @@ dependencies = [
     "certifi",
     "sentencepiece>=0.2.0",
     "accelerate>=1.6.0",
+    "flask>=3.1.0",
+    "flask-cors>=5.0.1",
 ]
