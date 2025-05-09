@@ -3,9 +3,9 @@ from haystack import Pipeline, Document
 from haystack_integrations.document_stores.elasticsearch import ElasticsearchDocumentStore
 from haystack.components.writers import DocumentWriter
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+from haystack.document_stores.errors import DuplicateDocumentError
 import time
 import logging
-# from elasticsearch import ElasticsearchException
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -21,7 +21,7 @@ custom_mapping = {
         "properties": {
             "embedding": {
                 "type": "dense_vector",
-                "dims": 384,  # Match sentence-transformers/all-MiniLM-L6-v2 embedding size
+                "dims": 768,
                 "index": True,
                 "similarity": "cosine"
             },
@@ -37,21 +37,21 @@ def setup_document_store():
     logger.info("Setting up document store")
     try:
         return ElasticsearchDocumentStore(
-            hosts=["http://localhost:9200"],
+            hosts=["http://host.docker.internal:9200"],
             index="scientific_papers",
             custom_mapping=custom_mapping,
             request_timeout=30,
             retry_on_timeout=True,
             max_retries=3
         )
-    except:
+    except Exception as e:
         logger.error(f"Failed to initialize ElasticsearchDocumentStore: {e}")
         raise
 
 # Initialize indexing pipeline
 indexing_pipeline = Pipeline()
-indexing_pipeline.add_component("embedder", SentenceTransformersDocumentEmbedder(model="sentence-transformers/all-MiniLM-L6-v2"))
-indexing_pipeline.add_component("writer", DocumentWriter(document_store=setup_document_store()))
+indexing_pipeline.add_component("embedder", SentenceTransformersDocumentEmbedder(model="allenai/specter"))
+indexing_pipeline.add_component("writer", DocumentWriter(document_store=setup_document_store(), policy="skip"))
 indexing_pipeline.connect("embedder.documents", "writer.documents")
 
 # Function to fetch PubMed abstracts based on search terms
@@ -89,7 +89,7 @@ def fetch_pubmed_abstracts(search_terms, max_results=100):
                     }
                 )
                 documents.append(doc)
-                logger.debug(f"Added document for PMID {pmid}, Type: {type(doc)}, Meta: {type(doc.meta)}")
+                logger.debug(f"Added document for PMID {pmid}")
             except (KeyError, TypeError) as e:
                 logger.warning(f"Skipping article due to error: {e}")
                 continue
@@ -108,7 +108,8 @@ def ingest_pubmed_abstracts(search_terms):
     try:
         indexing_pipeline.run(data={"embedder": {"documents": documents}})
         logger.debug(f"Ingested {len(documents)} documents into Elasticsearch")
-
+    except DuplicateDocumentError as e:
+        logger.warning(f"Some documents were skipped as they already exist: {e}")
     except Exception as e:
         logger.error(f"Error indexing documents: {e}")
         raise
@@ -116,4 +117,4 @@ def ingest_pubmed_abstracts(search_terms):
 # Example usage
 if __name__ == "__main__":
     search_terms = ["human", "disease", "protein"]
-    ingest_pubmed_abstracts(search_terms)
+    ingest_pubmed_abstracts(search_terms) 

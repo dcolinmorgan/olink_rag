@@ -17,7 +17,7 @@ custom_mapping = {
         "properties": {
             "embedding": {
                 "type": "dense_vector",
-                "dims": 768,
+                "dims": 384,  # Match sentence-transformers/all-MiniLM-L6-v2 embedding size
                 "index": True,
                 "similarity": "cosine"
             },
@@ -74,7 +74,7 @@ def setup_rag_system():
     
     # Create RAG pipeline
     pipeline = Pipeline()
-    pipeline.add_component("query_embedder", SentenceTransformersTextEmbedder(model="allenai/specter"))
+    pipeline.add_component("query_embedder", SentenceTransformersTextEmbedder(model="sentence-transformers/all-MiniLM-L6-v2"))
     pipeline.add_component("retriever", retriever)
     pipeline.add_component("prompt_builder", prompt_builder)
     pipeline.add_component("generator", generator)
