@@ -1,139 +1,122 @@
-from haystack.document_stores import ElasticsearchDocumentStore
-from haystack.nodes import EmbeddingRetriever, Seq2SeqGenerator
-from haystack.pipelines import GenerativeQAPipeline
-from pdfminer.high_level import extract_text
-import os
-import numpy as np
-import pandas as pd
-import umap
-from sklearn.neighbors import NearestNeighbors
-import graphistry
+from haystack_integrations.document_stores.elasticsearch import ElasticsearchDocumentStore
+from haystack_integrations.components.retrievers.elasticsearch import ElasticsearchEmbeddingRetriever
+from haystack.components.generators import HuggingFaceLocalGenerator
+from haystack import Pipeline
+from haystack.components.embedders import SentenceTransformersTextEmbedder
+from haystack.components.builders import PromptBuilder
+import logging
+from config import (
+    ELASTICSEARCH_HOST,
+    ELASTICSEARCH_INDEX,
+)
 
-# Extract text from PDFs and split into passages
-def extract_passages_from_pdfs(pdf_directory):
-    documents = []
-    for pdf_file in os.listdir(pdf_directory):
-        if pdf_file.endswith(".pdf"):
-            text = extract_text(os.path.join(pdf_directory, pdf_file))
-            passages = text.split("\n\n")  # Split by double newline for paragraphs
-            paper_id = os.path.splitext(pdf_file)[0]
-            for i, passage in enumerate(passages):
-                if passage.strip():
-                    doc = {
-                        "content": passage,
-                        "meta": {"paper_id": paper_id, "passage_index": i}
-                    }
-                    documents.append(doc)
-    return documents
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-# Set up RAG system with Elastic
-def setup_rag_system(documents):
-    # Initialize ElasticsearchDocumentStore
-    document_store = ElasticsearchDocumentStore(
-        host="localhost",
-        username="",
-        password="",
-        index="scientific_papers"
+# Define custom mapping for Elasticsearch index (matches pubmed_ingestion_pipeline.py)
+custom_mapping = {
+    "mappings": {
+        "properties": {
+            "embedding": {
+                "type": "dense_vector",
+                "dims": 768  # Match allenai/specter embedding size
+            },
+            "content": {"type": "text"},
+            "meta": {"type": "object"}
+        }
+    }
+}
+
+# Set up RAG system with existing Elasticsearch database
+def setup_rag_system():
+    """Set up RAG system with existing Elasticsearch database."""
+    logger.debug("Setting up RAG system...")
+
+    # Initialize Elasticsearch document store
+    try:
+        document_store = ElasticsearchDocumentStore(
+            hosts=ELASTICSEARCH_HOST,
+            index=ELASTICSEARCH_INDEX,
+            custom_mapping=custom_mapping,
+            request_timeout=30,
+            retry_on_timeout=True,
+            max_retries=3
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize ElasticsearchDocumentStore: {e}")
+        raise
+
+    # Initialize retriever
+    retriever = ElasticsearchEmbeddingRetriever(document_store=document_store)
+
+    # Set up prompt builder
+    prompt_template = """
+    Based on the following context, please answer the question.
+    
+    Context:
+    {% for doc in documents %}
+    {{ doc.content }}
+    {% endfor %}
+    
+    Question: {{ question }}
+    """
+    prompt_builder = PromptBuilder(template=prompt_template)
+
+    # Set up generator with local T5 model
+    generator = HuggingFaceLocalGenerator(
+        model="google/flan-t5-small",
+        generation_kwargs={
+            "max_new_tokens": 200,
+            "temperature": 0.7,
+            "top_p": 0.95
+        }
     )
-    
-    # Write passage documents to the store
-    document_store.write_documents(documents)
-    
-    # Use SPECTER for embeddings
-    retriever = EmbeddingRetriever(
-        document_store=document_store,
-        embedding_model="allenai/specter",
-        use_gpu=False
-    )
-    document_store.update_embeddings(retriever)
-    
-    # Set up generator for RAG
-    generator = Seq2SeqGenerator(model_name_or_path="google/flan-t5-base", max_length=200)
     
     # Create RAG pipeline
-    pipeline = GenerativeQAPipeline(generator=generator, retriever=retriever)
+    pipeline = Pipeline()
+    pipeline.add_component("query_embedder", SentenceTransformersTextEmbedder(model="allenai/specter"))
+    pipeline.add_component("retriever", retriever)
+    pipeline.add_component("prompt_builder", prompt_builder)
+    pipeline.add_component("generator", generator)
+    
+    # Connect components
+    pipeline.connect("query_embedder.embedding", "retriever.query_embedding")
+    pipeline.connect("retriever.documents", "prompt_builder.documents")
+    pipeline.connect("prompt_builder.prompt", "generator.prompt")
+    
     return pipeline, document_store
 
-# Query the RAG system
+# Query the RAG system with a question
 def query_system(pipeline, question):
-    result = pipeline.run(query=question, params={"Retriever": {"top_k": 5}})
-    return result["answers"][0].answer
-
-# Compute paper-level embeddings by averaging passage embeddings
-def get_paper_embeddings(document_store):
-    all_docs = document_store.get_all_documents(return_embedding=True)
-    paper_embeddings = {}
-    for doc in all_docs:
-        paper_id = doc.meta["paper_id"]
-        embedding = doc.embedding
-        if paper_id not in paper_embeddings:
-            paper_embeddings[paper_id] = []
-        paper_embeddings[paper_id].append(embedding)
-    # Average embeddings per paper
-    for paper_id, embeddings in paper_embeddings.items():
-        avg_embedding = np.mean(embeddings, axis=0)
-        paper_embeddings[paper_id] = avg_embedding
-    return paper_embeddings
-
-# Visualize papers with Graphistry
-def visualize_papers(document_store):
-    paper_embeddings = get_paper_embeddings(document_store)
-    paper_ids = list(paper_embeddings.keys())
-    embeddings = np.array([paper_embeddings[pid] for pid in paper_ids])
-    
-    # Reduce to 2D with UMAP
-    reducer = umap.UMAP(n_components=2)
-    projected = reducer.fit_transform(embeddings)
-    
-    # Compute KNN for edges
-    knn = NearestNeighbors(n_neighbors=5, metric='cosine')
-    knn.fit(embeddings)
-    distances, indices = knn.kneighbors(embeddings)
-    
-    # Create edges between similar papers
-    edges = []
-    for i, neighbors in enumerate(indices):
-        for j in neighbors:
-            if i != j:
-                edges.append((paper_ids[i], paper_ids[j]))
-    
-    # Prepare data for Graphistry
-    nodes_df = pd.DataFrame({
-        "node_id": paper_ids,
-        "x": projected[:, 0],
-        "y": projected[:, 1],
-        "title": paper_ids  # Use paper_id as title (extend with metadata if available)
-    })
-    edges_df = pd.DataFrame(edges, columns=["source", "target"])
-    
-    # Set up Graphistry (replace with your credentials)
-    graphistry.register(api=3, username='your_username', password='your_password')
-    
-    # Create and plot the graph
-    g = graphistry.bind(source="source", destination="target", node="node_id").nodes(nodes_df).edges(edges_df)
-    g = g.bind(point_title="title")
-    g.plot()
+    """Query the RAG system with a question."""
+    logger.debug(f"Querying system with: {question}")
+    try:
+        result = pipeline.run({
+            "query_embedder": {"text": question},
+            "retriever": {"top_k": 5},
+            "prompt_builder": {"question": question},
+            "generator": {}  # Generation kwargs are set in the component
+        })
+        return result["generator"]["replies"][0]
+    except Exception as e:
+        logger.error(f"Error querying system: {e}")
+        raise
 
 # Main execution
 if __name__ == "__main__":
-    # Specify your PDF directory
-    pdf_directory = "path/to/your/pdf_folder"
-    
-    # Extract and process PDFs
-    print("Extracting passages from PDFs...")
-    documents = extract_passages_from_pdfs(pdf_directory)
-    
-    # Set up RAG system
-    print("Setting up RAG system...")
-    pipeline, document_store = setup_rag_system(documents)
-    
-    # Example query
-    question = "What novel experimental results are reported in these papers?"
-    print("Querying the system...")
-    answer = query_system(pipeline, question)
-    print(f"Question: {question}")
-    print(f"Answer: {answer}")
-    
-    # Visualize the papers
-    print("Visualizing papers...")
-    visualize_papers(document_store)
+    # Set up the RAG system
+    pipeline, _ = setup_rag_system()
+
+    # Example queries
+    questions = [
+        "What are the key findings about protein biomarkers in disease?",
+        "What novel experimental methods are discussed in PubMed abstracts?",
+        "What are the main challenges in biomarker discovery?"
+    ]
+
+    # Run queries
+    for question in questions:
+        print("\nQuestion:", question)
+        answer = query_system(pipeline, question)
+        print("Answer:", answer)
